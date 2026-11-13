@@ -1,250 +1,374 @@
+import hashlib
 import os
 import time
-import random
-from typing import List, Dict, Any
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from concurrent.futures import ThreadPoolExecutor
-
-from PIL import ImageDraw
-from rtree import index
+from PIL import Image, ImageDraw
 
 from config import (
-    IS_WINDOWS,
-    IS_LINUX,
-    SCREENSHOT_DIR,
-    JSON_DIR,
-    TEXT_OFFSET_Y,
-    COLOR_MIN,
     COLOR_MAX,
-    log
+    COLOR_MIN,
+    IS_LINUX,
+    IS_WINDOWS,
+    JSON_DIR,
+    MIN_VISIBLE_RATIO,
+    MIN_VISIBLE_WINDOW_AREA,
+    SCREENSHOT_DIR,
+    TEXT_OFFSET_Y,
+    UIA_SCAN_BUDGET_MS,
+    UIA_HARD_TIMEOUT_MS,
+    log,
 )
-from elements.element import Element
-from core.geometry import rect_area, subtract_rects
-from core.screenshot import take_screenshot
+from core.geometry import (
+    intersect_rect,
+    rect_area,
+    subtract_rects,
+)
 from core.json_serializer import save_json
+from core.screenshot import take_screenshot
+from elements.element import Element, Rect
 
 if IS_WINDOWS:
     from platforms.windows import (
-        collect_window_elements,
+        WindowsUIAWorker,
         get_all_windows,
-        get_z_order
+        get_virtual_screen_rect,
+        get_z_order,
+    )
+elif IS_LINUX:
+    from platforms.linux import get_all_windows, get_z_order
+
+
+def _deduplicate_elements(elements: Iterable[Element]) -> List[Element]:
+    """Remove only byte-for-byte duplicate nodes without losing UI coverage."""
+    unique: Dict[Tuple[str, str, Rect], Element] = {}
+    for element in elements:
+        unique.setdefault((element.type, element.text, element.bbox), element)
+
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            item.bbox[1], item.bbox[0], item.bbox[3], item.bbox[2],
+            item.type, item.text,
+        ),
     )
 
-elif IS_LINUX:
-    from platforms.linux import LinuxWindow, get_all_windows, get_z_order
 
+def _deterministic_color(key: str) -> Tuple[int, int, int]:
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=3).digest()
+    span = COLOR_MAX - COLOR_MIN + 1
+    return tuple(COLOR_MIN + value % span for value in digest)
+
+
+def _select_visible_windows(
+    windows_in_order: List[Any],
+    screen_rect: Rect,
+) -> List[Any]:
+    """Select windows with a real, non-occluded desktop region before UIA."""
+    selected: List[Any] = []
+    covered: List[Rect] = []
+
+    for window in windows_in_order:
+        if not window.visible or window.minimized or getattr(window, "cloaked", False):
+            continue
+
+        clipped = intersect_rect(window.rect, screen_rect)
+        if clipped is None:
+            continue
+
+        visible_chunks = subtract_rects(clipped, covered)
+        visible_area = sum(rect_area(chunk) for chunk in visible_chunks)
+        if visible_area < MIN_VISIBLE_WINDOW_AREA:
+            continue
+
+        selected.append(window)
+        if getattr(window, "occludes", True):
+            covered.append(clipped)
+
+    return selected
 
 
 class DesktopScanner:
-    def __init__(self):
-        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-        os.makedirs(JSON_DIR, exist_ok=True)
+    def __init__(self, save_outputs: bool = True):
+        self.save_outputs = save_outputs
+        if save_outputs:
+            os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+            os.makedirs(JSON_DIR, exist_ok=True)
+
+        self._uia_worker: Optional[Any] = None
+        if IS_WINDOWS:
+            self._uia_worker = WindowsUIAWorker()
+
         self._reset_state()
+
+    def close(self):
+        if self._uia_worker is not None:
+            if not self._uia_worker.close():
+                log.warning("UIA worker did not stop within the timeout")
+            self._uia_worker = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def _reset_state(self):
-        self.windows = []
+        self.windows: List[Any] = []
         self.z_order: List[int] = []
         self.hwnd_to_window: Dict[int, Any] = {}
-        self.screen_img = None
+        self.screen_img: Optional[Image.Image] = None
+        self.screen_left = 0
+        self.screen_top = 0
         self.screen_width = 0
         self.screen_height = 0
-        self.covered_rects: List[Any] = []
         self.all_elements: List[Dict[str, Any]] = []
-        self.unique_elements: Dict[Any, float] = {}
         self.element_global_id = 0
+        self.timings: Dict[str, float] = {}
 
-    def get_all_windows(self):
-        if IS_WINDOWS:
-            self.windows = get_all_windows()
-        elif IS_LINUX:
-            self.windows = get_all_windows()
-        log.info(f"Найдено окон: {len(self.windows)}")
-
-    def get_windows_z_order(self):
-        if IS_WINDOWS:
-            self.z_order = get_z_order()
-        elif IS_LINUX:
-            self.z_order = get_z_order(self.windows)
-        self.hwnd_to_window = {w.hwnd: w for w in self.windows}
-
-    def scan(self):
-        log.info("Сканируем экран")
-        self._reset_state()
-
-        self.get_all_windows()
-        self.get_windows_z_order()
-
-        self.screen_img, self.screen_width, self.screen_height = take_screenshot()
-        if self.screen_img is None:
-            log.error("Скриншот не получен")
-            return
-
-        # --- Оптимизация: кэширование часто используемых объектов и функций ---
-        screen_w = self.screen_width
-        screen_h = self.screen_height
-        inv_w = 1.0 / screen_w
-        inv_h = 1.0 / screen_h
-
-        covered_rects = self.covered_rects
-        unique_elements = self.unique_elements
-        all_elements = self.all_elements
-
-        rtree_idx = index.Index()
-        draw = ImageDraw.Draw(self.screen_img)
-        draw_rect = draw.rectangle
-        draw_text = draw.text
-
-        rect_area_fn = rect_area
-        subtract_rects_fn = subtract_rects
-        rand_int = random.randint
-        tuple_fn = tuple
-        max_fn = max
-        min_fn = min
-        str_fn = str
-
-        color_min = COLOR_MIN
-        color_max = COLOR_MAX
-        text_offset_y = TEXT_OFFSET_Y
-
-        # Окна в правильном порядке
-        windows_in_order = [
+    def _load_windows(self):
+        self.windows = get_all_windows()
+        self.z_order = get_z_order() if IS_WINDOWS else get_z_order(self.windows)
+        self.hwnd_to_window = {window.hwnd: window for window in self.windows}
+        return [
             self.hwnd_to_window[hwnd]
             for hwnd in self.z_order
             if hwnd in self.hwnd_to_window
         ]
 
-        # Параллельный сбор элементов
-        elements_map = {}
+    def scan(self) -> Dict[str, Any]:
+        total_started = time.perf_counter()
+        self._reset_state()
+        log.info("Сканируем экран")
 
-        visible_windows = [
-            win for win in windows_in_order
-            if win.visible and not win.minimized
-        ]
+        stage_started = time.perf_counter()
+        windows_in_order = self._load_windows()
+        self.timings["windows_ms"] = (time.perf_counter() - stage_started) * 1000.0
 
         if IS_WINDOWS:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(collect_window_elements,visible_windows)
-                elements_map = future.result()
+            desktop_rect = get_virtual_screen_rect()
+            visible_windows = _select_visible_windows(windows_in_order, desktop_rect)
+            uia_future = self._uia_worker.submit(
+                visible_windows,
+                UIA_SCAN_BUDGET_MS,
+            )
+        else:
+            visible_windows = [
+                window
+                for window in windows_in_order
+                if window.visible and not window.minimized
+            ]
+            uia_future = None
 
-        elif IS_LINUX:
+        log.info(
+            "Окон ОС: %d; реально видимых для сканирования: %d",
+            len(self.windows),
+            len(visible_windows),
+        )
+
+        stage_started = time.perf_counter()
+        (
+            self.screen_img,
+            self.screen_left,
+            self.screen_top,
+            self.screen_width,
+            self.screen_height,
+        ) = take_screenshot()
+        self.timings["screenshot_ms"] = (
+            time.perf_counter() - stage_started
+        ) * 1000.0
+
+        if self.screen_img is None:
+            raise RuntimeError("Скриншот не получен")
+
+        if IS_WINDOWS:
+            try:
+                batch = uia_future.result(timeout=UIA_HARD_TIMEOUT_MS / 1000.0)
+            except FutureTimeoutError:
+                log.error("UIA hard timeout after %.0f ms", UIA_HARD_TIMEOUT_MS)
+                elements_map = {}
+                self.timings["uia_ms"] = UIA_HARD_TIMEOUT_MS
+            else:
+                elements_map = batch.elements
+                self.timings["uia_ms"] = batch.elapsed_ms
+                if batch.skipped_hwnds:
+                    log.warning(
+                        "UIA budget exhausted; skipped windows: %d",
+                        len(batch.skipped_hwnds),
+                    )
+                for hwnd, duration in sorted(
+                    batch.window_times_ms.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                ):
+                    if duration >= 5.0:
+                        window = self.hwnd_to_window.get(hwnd)
+                        log.info(
+                            "UIA %.1f ms: %s",
+                            duration,
+                            repr(window.title if window else hwnd),
+                        )
+        else:
+            stage_started = time.perf_counter()
             elements_map = {
                 window.hwnd: window.get_elements()
                 for window in visible_windows
             }
+            self.timings["uia_ms"] = (
+                time.perf_counter() - stage_started
+            ) * 1000.0
 
-        # Основная обработка
-        element_global_id = 0
+        stage_started = time.perf_counter()
+        screen_rect = (
+            self.screen_left,
+            self.screen_top,
+            self.screen_left + self.screen_width,
+            self.screen_top + self.screen_height,
+        )
+        covered_rects: List[Rect] = []
+        candidates: List[Dict[str, Any]] = []
 
-        for win in windows_in_order:
-            if not win.visible or win.minimized:
+        for window_index, window in enumerate(visible_windows):
+            window_rect = intersect_rect(window.rect, screen_rect)
+            if window_rect is None:
                 continue
 
-            elements = elements_map.get(win.hwnd, [])
-
-            # Оптимизация: если элементов нет, всё равно добавляем окно в R-tree для корректного перекрытия последующих
-            if not elements:
-                rtree_idx.insert(len(covered_rects), win.rect)
-                covered_rects.append(win.rect)
-                continue
-
-            win_rect = win.rect
-            win_title = win.title
-
-            for el in elements:
-                vx1, vy1, vx2, vy2 = el.bbox
-
-                if vx2 <= 0 or vy2 <= 0 or vx1 >= screen_w or vy1 >= screen_h:
+            elements = _deduplicate_elements(elements_map.get(window.hwnd, []))
+            for element in elements:
+                element_rect = intersect_rect(element.bbox, window_rect)
+                if element_rect is None:
                     continue
 
-                # Клиппинг по окну
-                vx1 = max_fn(vx1, win_rect[0])
-                vy1 = max_fn(vy1, win_rect[1])
-                vx2 = min_fn(vx2, win_rect[2])
-                vy2 = min_fn(vy2, win_rect[3])
-
-                if vx1 >= vx2 or vy1 >= vy2:
+                overlays = [
+                    overlay
+                    for overlay in covered_rects
+                    if intersect_rect(element_rect, overlay) is not None
+                ]
+                visible_chunks = subtract_rects(element_rect, overlays)
+                if not visible_chunks:
                     continue
 
-                element_rect = (vx1, vy1, vx2, vy2)
-                original_area = rect_area_fn(element_rect)
+                original_area = rect_area(element_rect)
+                visible_area = sum(rect_area(chunk) for chunk in visible_chunks)
+                if visible_area / original_area < MIN_VISIBLE_RATIO:
+                    continue
 
-                overlapping_ids = tuple_fn(rtree_idx.intersection(element_rect))
-
-                if not overlapping_ids:
-                    best_rect = element_rect
-                    visible_area = original_area
-
-                else:
-                    overlays = [
-                        covered_rects[index]
-                        for index in overlapping_ids
-                    ]
-
-                    visible_chunks = subtract_rects_fn(element_rect, overlays)
-
-                    if not visible_chunks:
-                        continue
-
-                    visible_area = sum(rect_area_fn(chunk) for chunk in visible_chunks)
-
-                    visibility_ratio = visible_area / original_area
-
-                    if visibility_ratio < 0.15:
-                        continue
-
-                    best_rect = max_fn(visible_chunks, key=rect_area_fn)
-
-                area = visible_area
-
-                element_key = (win_title, el.type, el.text, el.bbox)
-
-                if element_key in unique_elements:
-                    if area <= unique_elements[element_key]:
-                        continue
-
-                unique_elements[element_key] = area
-
-                ix1, iy1, ix2, iy2 = best_rect
-
-                color = (
-                    rand_int(color_min, color_max),
-                    rand_int(color_min, color_max),
-                    rand_int(color_min, color_max)
+                click_rect = max(visible_chunks, key=rect_area)
+                candidates.append(
+                    {
+                        "window_index": window_index,
+                        "window": window.title,
+                        "type": element.type,
+                        "text": element.text,
+                        "bbox_px": click_rect,
+                    }
                 )
 
-                draw_rect([ix1, iy1, ix2, iy2], outline=color, width=2)
-                draw_text((ix1, max(0, iy1 - text_offset_y)), str_fn(element_global_id), fill=color)
+            if getattr(window, "occludes", True):
+                covered_rects.append(window_rect)
 
-                norm_bbox = (
-                    ix1 * inv_w,
-                    iy1 * inv_h,
-                    ix2 * inv_w,
-                    iy2 * inv_h
-                )
+        candidates.sort(
+            key=lambda item: (
+                item["window_index"],
+                item["bbox_px"][1],
+                item["bbox_px"][0],
+                item["type"],
+                item["text"],
+            )
+        )
 
-                all_elements.append({
-                    "id": element_global_id,
-                    "type": el.type,
-                    "text": el.text,
-                    "bbox": norm_bbox,
-                    "window": win_title
-                })
+        draw = ImageDraw.Draw(self.screen_img)
+        inv_width = 1.0 / self.screen_width
+        inv_height = 1.0 / self.screen_height
+        all_elements: List[Dict[str, Any]] = []
 
-                element_global_id += 1
+        for element_id, candidate in enumerate(candidates):
+            x1, y1, x2, y2 = candidate["bbox_px"]
+            local_rect = (
+                x1 - self.screen_left,
+                y1 - self.screen_top,
+                x2 - self.screen_left,
+                y2 - self.screen_top,
+            )
+            key = (
+                f"{candidate['window']}|{candidate['type']}|"
+                f"{candidate['text']}|{candidate['bbox_px']}"
+            )
+            color = _deterministic_color(key)
+            draw.rectangle(local_rect, outline=color, width=2)
+            draw.text(
+                (local_rect[0], max(0, local_rect[1] - TEXT_OFFSET_Y)),
+                str(element_id),
+                fill=color,
+            )
+            all_elements.append(
+                {
+                    "id": element_id,
+                    "type": candidate["type"],
+                    "text": candidate["text"],
+                    "bbox": (
+                        local_rect[0] * inv_width,
+                        local_rect[1] * inv_height,
+                        local_rect[2] * inv_width,
+                        local_rect[3] * inv_height,
+                    ),
+                    "window": candidate["window"],
+                }
+            )
 
-            rtree_idx.insert(len(covered_rects), win.rect)
-            covered_rects.append(win.rect)
+        self.all_elements = all_elements
+        self.element_global_id = len(all_elements)
+        self.timings["processing_ms"] = (
+            time.perf_counter() - stage_started
+        ) * 1000.0
+        self.timings["capture_ms"] = (
+            time.perf_counter() - total_started
+        ) * 1000.0
 
-        self.element_global_id = element_global_id
+        image_path = None
+        json_path = None
+        persist_started = time.perf_counter()
+        if self.save_outputs:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            image_path = os.path.join(
+                SCREENSHOT_DIR,
+                f"FULL_DESKTOP_{timestamp}.jpg",
+            )
+            json_path = os.path.join(
+                JSON_DIR,
+                f"FULL_DESKTOP_{timestamp}.json",
+            )
+            self.screen_img.save(image_path, format="JPEG", quality=85)
+            save_json(
+                json_path,
+                {"elements": all_elements},
+                pretty=True,
+            )
 
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        img_path = os.path.join(SCREENSHOT_DIR, f"FULL_DESKTOP_{timestamp}.jpg")
-        json_path = os.path.join(JSON_DIR, f"FULL_DESKTOP_{timestamp}.json")
+        self.timings["persist_ms"] = (
+            time.perf_counter() - persist_started
+        ) * 1000.0
+        self.timings["total_ms"] = (
+            time.perf_counter() - total_started
+        ) * 1000.0
 
-        if self.screen_img.mode == "RGBA":
-            self.screen_img = self.screen_img.convert("RGB")
+        log.info("Найдено элементов: %d", len(all_elements))
+        log.info(
+            "Время: capture %.1f ms; persist %.1f ms; total %.1f ms "
+            "(screenshot %.1f; UIA %.1f; processing %.1f)",
+            self.timings["capture_ms"],
+            self.timings["persist_ms"],
+            self.timings["total_ms"],
+            self.timings["screenshot_ms"],
+            self.timings["uia_ms"],
+            self.timings["processing_ms"],
+        )
 
-        self.screen_img.save(img_path, format="JPEG", quality=85)
-        save_json(json_path, {"elements": all_elements})
-
-        log.info(f"Найдено элементов: {len(all_elements)}")
+        return {
+            "elements": all_elements,
+            "timings_ms": dict(self.timings),
+            "image_path": image_path,
+            "json_path": json_path,
+        }

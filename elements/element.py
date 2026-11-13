@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Tuple
 
 # Тип прямоугольника
@@ -94,9 +95,9 @@ UIA_ROLE_MAP = {
     "TreeItem": "span", # элементы дерева (диски, папки)
 }
 
+@dataclass(frozen=True)
 class Element:
-    def __init__(self, id: int, type: str, text: str, bbox: Rect):
-        self.id = id
-        self.type = type
-        self.text = text
-        self.bbox = bbox
+    id: int
+    type: str
+    text: str
+    bbox: Rect

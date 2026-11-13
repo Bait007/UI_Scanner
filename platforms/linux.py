@@ -49,7 +49,7 @@ class LinuxWindow:
                     x = y = w = h = 0
 
                 if w < MIN_ELEMENT_WIDTH or h < MIN_ELEMENT_HEIGHT:
-                    pass
+                    return
 
                 text = node.name or ""
 
@@ -116,6 +116,21 @@ def get_all_windows() -> List[LinuxWindow]:
                 x, y = ext.x, ext.y
                 w, h = ext.width, ext.height
 
+                try:
+                    state = win.getState()
+                    visible = state.contains(pyatspi.STATE_VISIBLE) and state.contains(
+                        pyatspi.STATE_SHOWING
+                    )
+                    iconified_state = getattr(pyatspi, "STATE_ICONIFIED", None)
+                    minimized = (
+                        state.contains(iconified_state)
+                        if iconified_state is not None
+                        else False
+                    )
+                except Exception:
+                    visible = True
+                    minimized = False
+
                 if w < MIN_ELEMENT_WIDTH or h < MIN_ELEMENT_HEIGHT:
                     continue
 
@@ -124,8 +139,8 @@ def get_all_windows() -> List[LinuxWindow]:
                         hwnd=id(win),
                         title=win.name or app.name,
                         rect=(x, y, x + w, y + h),
-                        visible=True,
-                        minimized=False,
+                        visible=visible,
+                        minimized=minimized,
                         window_obj=win
                     )
                 )
@@ -139,6 +154,35 @@ def get_all_windows() -> List[LinuxWindow]:
     return windows
 
 
-# примерный Z-order
 def get_z_order(windows: List[LinuxWindow]) -> List[int]:
-    return [w.hwnd for w in sorted(windows, key=lambda win: (win.rect[1], win.rect[0]))]
+    # EWMH returns client windows from bottom to top. Match them to AT-SPI
+    # windows by title and reverse the result to match the Windows path.
+    try:
+        from ewmh import EWMH
+
+        ewmh = EWMH()
+        stacking = list(ewmh.getClientListStacking() or [])
+        unused = list(windows)
+        result: List[int] = []
+
+        for x_window in reversed(stacking):
+            title = ewmh.getWmName(x_window)
+            if isinstance(title, bytes):
+                title = title.decode("utf-8", errors="replace")
+
+            match = next((window for window in unused if window.title == title), None)
+            if match is not None:
+                result.append(match.hwnd)
+                unused.remove(match)
+
+        result.extend(
+            window.hwnd
+            for window in sorted(unused, key=lambda item: (item.rect[1], item.rect[0]))
+        )
+        return result
+    except Exception as error:
+        log.debug("Не удалось получить EWMH Z-order: %s", error)
+        return [
+            window.hwnd
+            for window in sorted(windows, key=lambda item: (item.rect[1], item.rect[0]))
+        ]
