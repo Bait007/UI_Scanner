@@ -3,8 +3,7 @@ import time
 import random
 from typing import List, Dict, Any
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import pythoncom
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import ImageDraw
 from rtree import index
@@ -25,14 +24,15 @@ from core.screenshot import take_screenshot
 from core.json_serializer import save_json
 
 if IS_WINDOWS:
-    from platforms.windows import WindowsWindow, get_all_windows, get_z_order
+    from platforms.windows import (
+        collect_window_elements,
+        get_all_windows,
+        get_z_order
+    )
+
 elif IS_LINUX:
     from platforms.linux import LinuxWindow, get_all_windows, get_z_order
 
-
-def _get_elements_threadsafe(win):
-    # COM уже инициализирован в потоке через initializer
-    return win.hwnd, win.get_elements()
 
 
 class DesktopScanner:
@@ -98,7 +98,6 @@ class DesktopScanner:
         subtract_rects_fn = subtract_rects
         rand_int = random.randint
         tuple_fn = tuple
-        any_fn = any
         max_fn = max
         min_fn = min
         str_fn = str
@@ -122,17 +121,16 @@ class DesktopScanner:
             if win.visible and not win.minimized
         ]
 
-        # Оптимизация: адаптивное количество потоков (до 8 для стабильности COM)
-        max_workers = min(os.cpu_count() or 4, 8, len(visible_windows)) or 1
+        if IS_WINDOWS:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(collect_window_elements,visible_windows)
+                elements_map = future.result()
 
-        with ThreadPoolExecutor(max_workers=max_workers, initializer=pythoncom.CoInitialize) as executor:
-            futures = [
-                executor.submit(_get_elements_threadsafe, win)
-                for win in visible_windows
-            ]
-            for future in as_completed(futures):
-                hwnd, elements = future.result()
-                elements_map[hwnd] = elements
+        elif IS_LINUX:
+            elements_map = {
+                window.hwnd: window.get_elements()
+                for window in visible_windows
+            }
 
         # Основная обработка
         element_global_id = 0
@@ -155,12 +153,6 @@ class DesktopScanner:
             for el in elements:
                 vx1, vy1, vx2, vy2 = el.bbox
 
-                cx = (vx1 + vx2) * 0.5
-                cy = (vy1 + vy2) * 0.5
-
-                # Быстрый отсев за экраном
-                if cx < 0 or cy < 0 or cx > screen_w or cy > screen_h:
-                    continue
                 if vx2 <= 0 or vy2 <= 0 or vx1 >= screen_w or vy1 >= screen_h:
                     continue
 
@@ -173,24 +165,36 @@ class DesktopScanner:
                 if vx1 >= vx2 or vy1 >= vy2:
                     continue
 
-                # R-tree запросы
-                if any_fn(rtree_idx.intersection((cx, cy, cx, cy))):
-                    continue
+                element_rect = (vx1, vy1, vx2, vy2)
+                original_area = rect_area_fn(element_rect)
 
-                overlapping_ids = tuple_fn(rtree_idx.intersection((vx1, vy1, vx2, vy2)))
+                overlapping_ids = tuple_fn(rtree_idx.intersection(element_rect))
 
                 if not overlapping_ids:
-                    best_rect = (vx1, vy1, vx2, vy2)
-                    area = rect_area_fn(best_rect)
+                    best_rect = element_rect
+                    visible_area = original_area
+
                 else:
-                    overlays = [covered_rects[i] for i in overlapping_ids]
-                    visible_chunks = subtract_rects_fn((vx1, vy1, vx2, vy2), overlays)
+                    overlays = [
+                        covered_rects[index]
+                        for index in overlapping_ids
+                    ]
+
+                    visible_chunks = subtract_rects_fn(element_rect, overlays)
 
                     if not visible_chunks:
                         continue
 
+                    visible_area = sum(rect_area_fn(chunk) for chunk in visible_chunks)
+
+                    visibility_ratio = visible_area / original_area
+
+                    if visibility_ratio < 0.15:
+                        continue
+
                     best_rect = max_fn(visible_chunks, key=rect_area_fn)
-                    area = rect_area_fn(best_rect)
+
+                area = visible_area
 
                 element_key = (win_title, el.type, el.text, el.bbox)
 

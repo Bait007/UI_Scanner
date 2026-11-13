@@ -1,7 +1,6 @@
 import cProfile
 import pstats
 import io
-import time
 
 from scanner import DesktopScanner
 
