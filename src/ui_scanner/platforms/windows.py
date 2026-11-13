@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 
-sys.coinit_flags = 0  # COINIT_MULTITHREADED
+sys.coinit_flags = 0
 logging.getLogger("comtypes").setLevel(logging.WARNING)
 
 import comtypes
@@ -20,8 +20,8 @@ import win32con
 import win32gui
 import win32process
 
-from config import MIN_ELEMENT_HEIGHT, MIN_ELEMENT_WIDTH, log
-from elements.element import Element, INTERACTIVE_ELEMENTS, UIA_ROLE_MAP, Rect
+from ..config import MIN_ELEMENT_HEIGHT, MIN_ELEMENT_WIDTH, log
+from ..elements.element import Element, INTERACTIVE_ELEMENTS, UIA_ROLE_MAP, Rect
 
 
 DWMWA_CLOAKED = 14
@@ -29,7 +29,6 @@ DWMWA_CLOAKED = 14
 
 def _enable_per_monitor_dpi_awareness():
     try:
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         return
     except (AttributeError, OSError):
@@ -75,7 +74,7 @@ def _is_cloaked(hwnd: int) -> bool:
             hwnd,
             DWMWA_CLOAKED,
             ctypes.byref(value),
-            ctypes.sizeof(value),
+            ctypes.sizeof(value)
         )
         return result == 0 and bool(value.value)
     except (AttributeError, OSError):
@@ -98,7 +97,7 @@ class WindowsUIAClient:
         self.automation = comtypes.CoCreateInstance(
             UIAutomationClient.CUIAutomation().IPersist_GetClassID(),
             interface=UIAutomationClient.IUIAutomation,
-            clsctx=comtypes.CLSCTX_INPROC_SERVER,
+            clsctx=comtypes.CLSCTX_INPROC_SERVER
         )
         self.control_types_by_id: Dict[int, str] = {}
         self.condition = self._create_condition()
@@ -114,12 +113,8 @@ class WindowsUIAClient:
                 continue
             control_type_id = getattr(self.uia_module, constant_name)
             self.control_types_by_id[control_type_id] = control_type
-            type_conditions.append(
-                self.automation.CreatePropertyCondition(
-                    self.uia_module.UIA_ControlTypePropertyId,
-                    control_type_id,
-                )
-            )
+            condition = self.automation.CreatePropertyCondition(self.uia_module.UIA_ControlTypePropertyId, control_type_id)
+            type_conditions.append(condition)
 
         if not type_conditions:
             raise RuntimeError("No supported UIA control types configured")
@@ -129,15 +124,9 @@ class WindowsUIAClient:
             if len(type_conditions) == 1
             else self.automation.CreateOrConditionFromArray(type_conditions)
         )
-        enabled_condition = self.automation.CreatePropertyCondition(
-            self.uia_module.UIA_IsEnabledPropertyId, True
-        )
-        onscreen_condition = self.automation.CreatePropertyCondition(
-            self.uia_module.UIA_IsOffscreenPropertyId, False
-        )
-        return self.automation.CreateAndConditionFromArray(
-            [type_condition, enabled_condition, onscreen_condition]
-        )
+        enabled_condition = self.automation.CreatePropertyCondition(self.uia_module.UIA_IsEnabledPropertyId, True)
+        onscreen_condition = self.automation.CreatePropertyCondition(self.uia_module.UIA_IsOffscreenPropertyId, False)
+        return self.automation.CreateAndConditionFromArray([type_condition, enabled_condition, onscreen_condition])
 
     def _create_cache_request(self):
         cache = self.automation.CreateCacheRequest()
@@ -146,7 +135,7 @@ class WindowsUIAClient:
             self.uia_module.UIA_NamePropertyId,
             self.uia_module.UIA_BoundingRectanglePropertyId,
             self.uia_module.UIA_IsEnabledPropertyId,
-            self.uia_module.UIA_IsOffscreenPropertyId,
+            self.uia_module.UIA_IsOffscreenPropertyId
         ):
             cache.AddProperty(property_id)
         cache.TreeScope = self.uia_module.TreeScope_Element
@@ -160,7 +149,7 @@ class WindowsUIAClient:
             found = root.FindAllBuildCache(
                 self.uia_module.TreeScope_Descendants,
                 self.condition,
-                self.cache_request,
+                self.cache_request
             )
         except Exception as error:
             log.warning("Не удалось получить UIA-элементы HWND %s: %s", hwnd, error)
@@ -183,7 +172,7 @@ class WindowsUIAClient:
                         id=0,
                         type=UIA_ROLE_MAP.get(control_type, control_type.lower()),
                         text=item.CachedName or "",
-                        bbox=(rect.left, rect.top, rect.right, rect.bottom),
+                        bbox=(rect.left, rect.top, rect.right, rect.bottom)
                     )
                 )
             except Exception as error:
@@ -191,7 +180,7 @@ class WindowsUIAClient:
                     "Ошибка UIA-элемента HWND %s, index %s: %s",
                     hwnd,
                     index,
-                    error,
+                    error
                 )
                 continue
 
@@ -199,14 +188,12 @@ class WindowsUIAClient:
             elements,
             key=lambda item: (
                 item.bbox[1], item.bbox[0], item.bbox[3], item.bbox[2],
-                item.type, item.text,
-            ),
+                item.type, item.text
+            )
         )
 
 
 class WindowsUIAWorker:
-    """One long-lived MTA thread with one reusable UIA client."""
-
     def __init__(self):
         self._requests = queue.Queue()
         self._ready = threading.Event()
@@ -215,7 +202,7 @@ class WindowsUIAWorker:
         self._thread = threading.Thread(
             target=self._run,
             name="ui-scanner-uia",
-            daemon=True,
+            daemon=True
         )
         self._thread.start()
         self._ready.wait()
@@ -254,7 +241,7 @@ class WindowsUIAWorker:
     def _collect(
         client: WindowsUIAClient,
         windows: List[WindowsWindow],
-        budget_ms: Optional[float],
+        budget_ms: Optional[float]
     ) -> UIAScanBatch:
         started = time.perf_counter()
         elements: Dict[int, List[Element]] = {}
@@ -269,9 +256,6 @@ class WindowsUIAWorker:
             window_started = time.perf_counter()
             window_elements = client.get_elements(window.hwnd)
 
-            # Chromium/Electron may expose only a tiny bootstrap tree on the
-            # first request. A short second query makes a one-shot scan much
-            # more stable while remaining inside the UIA budget.
             width = max(0, window.rect[2] - window.rect[0])
             height = max(0, window.rect[3] - window.rect[1])
             elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -295,14 +279,10 @@ class WindowsUIAWorker:
             elements=elements,
             window_times_ms=window_times,
             skipped_hwnds=tuple(skipped),
-            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0
         )
 
-    def submit(
-        self,
-        windows: List[WindowsWindow],
-        budget_ms: Optional[float],
-    ) -> Future:
+    def submit(self, windows: List[WindowsWindow], budget_ms: Optional[float]) -> Future:
         future = Future()
         self._requests.put((windows, budget_ms, future))
         return future
@@ -332,7 +312,7 @@ def get_all_windows() -> List[WindowsWindow]:
                     class_name=win32gui.GetClassName(hwnd),
                     process_id=process_id,
                     cloaked=_is_cloaked(hwnd),
-                    occludes=_window_occludes(hwnd),
+                    occludes=_window_occludes(hwnd)
                 )
             )
         except Exception as error:

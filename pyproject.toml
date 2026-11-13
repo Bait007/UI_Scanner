@@ -1,0 +1,24 @@
+[project]
+name = "ui-scanner"
+version = "0.1.0"
+description = "Fast cross-platform desktop UI element scanner using system accessibility APIs"
+readme = "README.md"
+requires-python = ">=3.10,<4.0"
+dependencies = [
+    "mss>=10.1,<11",
+    "pillow>=12.1,<13",
+    "comtypes>=1.4,<2; sys_platform == 'win32'",
+    "pywin32>=311; sys_platform == 'win32'",
+    "ewmh>=0.1.6,<0.2; sys_platform == 'linux'",
+    "python-xlib>=0.33,<0.34; sys_platform == 'linux'"
+]
+
+[project.scripts]
+ui-scanner = "ui_scanner.main:main"
+
+[tool.poetry]
+packages = [{ include = "ui_scanner", from = "src" }]
+
+[build-system]
+requires = ["poetry-core>=2.0,<3.0"]
+build-backend = "poetry.core.masonry.api"

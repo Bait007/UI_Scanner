@@ -62,7 +62,6 @@ Linux-конфигурация дополнительно содержит со�
 - Python 3.10 или новее
 - Windows 10/11 либо Linux с доступным AT-SPI
 - доступ к интерактивной пользовательской сессии
-- системная библиотека Spatial Index для `rtree`, если она не поставляется готовым wheel-пакетом для используемой платформы.
 
 Основные Python-зависимости:
 
@@ -70,21 +69,13 @@ Linux-конфигурация дополнительно содержит со�
 - `python3-pyatspi`, `python-xlib`, `ewmh` — Linux-интеграция
 - `mss` — быстрый снимок экрана
 - `Pillow` — обработка и аннотирование изображения
-- `rtree` — пространственный поиск пересечений.
 
 ## Установка
 
-Создайте виртуальное окружение в каталоге проекта:
+Установите зависимости через Poetry:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Для Windows установите зависимости:
-
-```powershell
-pip install pywin32 comtypes mss pillow rtree
+poetry install
 ```
 
 Для Linux набор системных пакетов зависит от дистрибутива. Помимо Python-зависимостей должны быть доступны AT-SPI и средства создания снимка экрана. Для Wayland UI Scanner вызывает `gnome-screenshot`.
@@ -94,7 +85,7 @@ pip install pywin32 comtypes mss pillow rtree
 Запускайте программу из корня проекта:
 
 ```powershell
-python main.py
+poetry run ui-scanner
 ```
 
 Во время выполнения в консоль выводятся количество окон, число реально видимых окон, количество элементов и разбивка времени по этапам.
@@ -103,13 +94,13 @@ python main.py
 
 ```powershell
 # Пять последовательных сканов одним прогретым UIA worker
-python main.py --repeat 5
+poetry run ui-scanner --repeat 5
 
 # Измерить snapshot без записи JPEG и JSON
-python main.py --no-save --repeat 5
+poetry run ui-scanner --no-save --repeat 5
 
 # Включить cProfile
-python main.py --profile
+poetry run ui-scanner --profile
 ```
 
 Профилирование по умолчанию отключено и не влияет на обычный запуск.
@@ -158,24 +149,23 @@ JSON содержит массив `elements`:
 
 ```text
 ui_scanner/
-├── main.py                  # точка входа и профилирование
-├── scanner.py               # основной процесс сканирования
-├── config.py                # параметры и логирование
-├── core/
-│   ├── geometry.py          # расчёт видимых прямоугольников
-│   ├── screenshot.py        # создание снимка экрана
-│   └── json_serializer.py   # экспорт JSON
-├── elements/
-│   └── element.py           # модель элемента и сопоставление ролей
-├── platforms/
-│   ├── windows.py           # Windows UI Automation
-│   └── linux.py             # Linux AT-SPI
-└── results/                 # снимки и JSON-файлы
+├── src/
+│   └── ui_scanner/
+│       ├── main.py
+│       ├── scanner.py
+│       ├── config.py
+│       ├── core/
+│       ├── elements/
+│       └── platforms/
+├── tests/
+├── results/
+├── pyproject.toml
+└── poetry.lock
 ```
 
 ## Настройка
 
-Основные параметры находятся в `config.py`:
+Основные параметры находятся в `src/ui_scanner/config.py`:
 
 | Параметр | Назначение |
 | --- | --- |
@@ -186,7 +176,7 @@ ui_scanner/
 | `SCREENSHOT_DIR` | каталог снимков |
 | `JSON_DIR` | каталог JSON-файлов |
 
-Набор распознаваемых ролей и правила преобразования платформенных типов находятся в `elements/element.py`.
+Набор распознаваемых ролей и правила преобразования платформенных типов находятся в `src/ui_scanner/elements/element.py`.
 
 ## Особенности системных API
 
@@ -201,7 +191,7 @@ UI Scanner получает только те данные, которые пр�
 Сканер можно вызвать из Python-кода:
 
 ```python
-from scanner import DesktopScanner
+from ui_scanner.scanner import DesktopScanner
 
 scanner = DesktopScanner()
 scanner.scan()

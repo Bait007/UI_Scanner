@@ -64,7 +64,7 @@ LINUX_ROLE_MAP = {
     "table cell": "container",
     "tree": "container",
     "label": "container",
-    "separator": "container",
+    "separator": "container"
 }
 
 

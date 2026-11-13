@@ -1,8 +1,8 @@
 from typing import List, Tuple, Any, Optional
 import pyatspi
 
-from elements.element import Element, LINUX_ROLE_MAP
-from config import MIN_ELEMENT_WIDTH, MIN_ELEMENT_HEIGHT, log
+from ..elements.element import Element, LINUX_ROLE_MAP
+from ..config import MIN_ELEMENT_WIDTH, MIN_ELEMENT_HEIGHT, log
 
 Rect = Tuple[int, int, int, int]
 
@@ -155,8 +155,6 @@ def get_all_windows() -> List[LinuxWindow]:
 
 
 def get_z_order(windows: List[LinuxWindow]) -> List[int]:
-    # EWMH returns client windows from bottom to top. Match them to AT-SPI
-    # windows by title and reverse the result to match the Windows path.
     try:
         from ewmh import EWMH
 

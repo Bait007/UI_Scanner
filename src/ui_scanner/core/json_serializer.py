@@ -8,5 +8,5 @@ def save_json(path: str, data: dict, pretty: bool = True) -> None:
             f,
             ensure_ascii=False,
             indent=2 if pretty else None,
-            separators=None if pretty else (",", ":"),
+            separators=None if pretty else (",", ":")
         )

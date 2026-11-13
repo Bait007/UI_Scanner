@@ -3,7 +3,7 @@ import cProfile
 import io
 import pstats
 
-from scanner import DesktopScanner
+from .scanner import DesktopScanner
 
 
 def parse_args():
@@ -11,18 +11,18 @@ def parse_args():
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="print cProfile statistics for scan(), disabled by default",
+        help="print cProfile statistics for scan(), disabled by default"
     )
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help="measure the in-memory snapshot without JPEG/JSON persistence",
+        help="measure the in-memory snapshot without JPEG/JSON persistence"
     )
     parser.add_argument(
         "--repeat",
         type=int,
         default=1,
-        help="run multiple scans with the same warm UIA worker",
+        help="run multiple scans with the same warm UIA worker"
     )
     return parser.parse_args()
 
@@ -48,9 +48,7 @@ def main():
     with DesktopScanner(save_outputs=not args.no_save) as scanner:
         results = []
         for _ in range(repeat):
-            results.append(
-                run_profiled(scanner) if args.profile else scanner.scan()
-            )
+            results.append(run_profiled(scanner) if args.profile else scanner.scan())
 
     if repeat > 1:
         totals = [result["timings_ms"]["total_ms"] for result in results]

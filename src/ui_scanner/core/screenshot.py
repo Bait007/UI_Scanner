@@ -4,7 +4,7 @@ import atexit
 from typing import Tuple, Optional
 import mss
 from PIL import Image
-from config import IS_WINDOWS, IS_LINUX
+from ..config import IS_WINDOWS, IS_LINUX
 
 _sct = mss.mss()
 atexit.register(_sct.close)
@@ -16,8 +16,6 @@ def take_screenshot() -> Tuple[Optional[Image.Image], int, int, int, int]:
         if IS_WINDOWS or (IS_LINUX and os.environ.get("XDG_SESSION_TYPE", "").lower() == "x11"):
             monitor = _sct.monitors[0]
             shot = _sct.grab(monitor)
-            # mss уже отдаёт BGRA. Передача raw BGRX в Pillow избегает
-            # дополнительного построения shot.rgb (~10-15 мс на 2560x1600).
             img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
             left = monitor["left"]
             top = monitor["top"]
