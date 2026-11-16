@@ -40,7 +40,7 @@ UI Scanner — инструмент для получения структури
 8. Рисует рамки и идентификаторы на снимке.
 9. Сохраняет изображение и структурированный JSON в каталог `results`.
 
-На Windows источником данных служит Microsoft UI Automation через `pywinauto`. На Linux используется AT-SPI. Текст берётся из accessibility-свойств приложения, а не распознаётся по пикселям.
+На Windows источником данных служит нативный Microsoft UI Automation через `comtypes`. На Linux используется AT-SPI. Текст берётся из accessibility-свойств приложения, а не распознаётся по пикселям.
 
 ## Поддерживаемые элементы
 
@@ -62,29 +62,20 @@ Linux-конфигурация дополнительно содержит со�
 - Python 3.10 или новее
 - Windows 10/11 либо Linux с доступным AT-SPI
 - доступ к интерактивной пользовательской сессии
-- системная библиотека Spatial Index для `rtree`, если она не поставляется готовым wheel-пакетом для используемой платформы.
 
 Основные Python-зависимости:
 
-- `pywinauto`, `pywin32`, `comtypes` — Windows UI Automation
+- `pywin32`, `comtypes` — Windows UI Automation и Win32
 - `python3-pyatspi`, `python-xlib`, `ewmh` — Linux-интеграция
 - `mss` — быстрый снимок экрана
 - `Pillow` — обработка и аннотирование изображения
-- `rtree` — пространственный поиск пересечений.
 
 ## Установка
 
-Создайте виртуальное окружение в каталоге проекта:
+Установите зависимости через Poetry:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Для Windows установите зависимости:
-
-```powershell
-pip install pywinauto pywin32 comtypes mss pillow rtree
+poetry install
 ```
 
 Для Linux набор системных пакетов зависит от дистрибутива. Помимо Python-зависимостей должны быть доступны AT-SPI и средства создания снимка экрана. Для Wayland UI Scanner вызывает `gnome-screenshot`.
@@ -94,19 +85,34 @@ pip install pywinauto pywin32 comtypes mss pillow rtree
 Запускайте программу из корня проекта:
 
 ```powershell
-python main.py
+poetry run ui-scanner
 ```
 
-Во время выполнения в консоль выводятся количество найденных окон, количество элементов и статистика профилирования.
+Во время выполнения в консоль выводятся количество окон, число реально видимых окон, количество элементов и разбивка времени по этапам.
+
+Полезные режимы:
+
+```powershell
+# Пять последовательных сканов одним прогретым UIA worker
+poetry run ui-scanner --repeat 5
+
+# Измерить snapshot без записи JPEG и JSON
+poetry run ui-scanner --no-save --repeat 5
+
+# Включить cProfile
+poetry run ui-scanner --profile
+```
+
+Профилирование по умолчанию отключено и не влияет на обычный запуск.
 
 Результаты сохраняются в:
 
 ```text
 results/
 ├── screenshots/
-│   └── FULL_DESKTOP_YYYYMMDD_HHMMSS.jpg
+│   └── FULL_DESKTOP_YYYYMMDD_HHMMSS_mmm.jpg
 └── json-files/
-    └── FULL_DESKTOP_YYYYMMDD_HHMMSS.json
+    └── FULL_DESKTOP_YYYYMMDD_HHMMSS_mmm.json
 ```
 
 ## Формат результата
@@ -143,24 +149,23 @@ JSON содержит массив `elements`:
 
 ```text
 ui_scanner/
-├── main.py                  # точка входа и профилирование
-├── scanner.py               # основной процесс сканирования
-├── config.py                # параметры и логирование
-├── core/
-│   ├── geometry.py          # расчёт видимых прямоугольников
-│   ├── screenshot.py        # создание снимка экрана
-│   └── json_serializer.py   # экспорт JSON
-├── elements/
-│   └── element.py           # модель элемента и сопоставление ролей
-├── platforms/
-│   ├── windows.py           # Windows UI Automation
-│   └── linux.py             # Linux AT-SPI
-└── results/                 # снимки и JSON-файлы
+├── src/
+│   └── ui_scanner/
+│       ├── main.py
+│       ├── scanner.py
+│       ├── config.py
+│       ├── core/
+│       ├── elements/
+│       └── platforms/
+├── tests/
+├── results/
+├── pyproject.toml
+└── poetry.lock
 ```
 
 ## Настройка
 
-Основные параметры находятся в `config.py`:
+Основные параметры находятся в `src/ui_scanner/config.py`:
 
 | Параметр | Назначение |
 | --- | --- |
@@ -171,7 +176,7 @@ ui_scanner/
 | `SCREENSHOT_DIR` | каталог снимков |
 | `JSON_DIR` | каталог JSON-файлов |
 
-Набор распознаваемых ролей и правила преобразования платформенных типов находятся в `elements/element.py`.
+Набор распознаваемых ролей и правила преобразования платформенных типов находятся в `src/ui_scanner/elements/element.py`.
 
 ## Особенности системных API
 
@@ -180,29 +185,6 @@ UI Scanner получает только те данные, которые пр�
 Стандартные Win32, WinForms, WPF, Qt и браузерные интерфейсы обычно предоставляют системное дерево элементов. Интерфейсы на основе canvas, WebGL, игр, удалённого рабочего стола и полностью пользовательской отрисовки могут отдавать неполную структуру или не отдавать её вовсе.
 
 Сканирование выполняется в текущей интерактивной сессии. Для доступа к приложениям, запущенным с повышенными правами, самому UI Scanner также могут потребоваться соответствующие права.
-
-## Программное использование
-
-Сканер можно вызвать из Python-кода:
-
-```python
-from scanner import DesktopScanner
-
-scanner = DesktopScanner()
-scanner.scan()
-
-for element in scanner.all_elements:
-    print(element["id"], element["type"], element["text"])
-```
-
-После вызова `scan()` экземпляр содержит:
-
-- `windows` — найденные окна
-- `z_order` — порядок окон
-- `screen_img` — аннотированное изображение
-- `screen_width`, `screen_height` — размер снимка
-- `all_elements` — список найденных элементов
-- `element_global_id` — число назначенных идентификаторов.
 
 ## Конфиденциальность
 

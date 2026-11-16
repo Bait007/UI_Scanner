@@ -10,6 +10,13 @@ IS_LINUX = platform.system() == "Linux"
 MIN_ELEMENT_WIDTH = 5
 MIN_ELEMENT_HEIGHT = 5
 
+MIN_VISIBLE_RATIO = 0.15
+
+MIN_VISIBLE_WINDOW_AREA = 64
+
+UIA_SCAN_BUDGET_MS = None
+UIA_HARD_TIMEOUT_MS = 1000.0
+
 # Смещения текста/номера прямоугольника
 TEXT_OFFSET_Y = 11
 
